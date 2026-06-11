@@ -1,11 +1,12 @@
 """ SLAGALICA
 =====================================
 Klase:
-  - Slagalica    : sva logika igre slova (abeceda, težine, rječnik, highscore, animacija, unos, provjera)
-  - MojBroj      : logika igre brojeva (odabir, animacija, izraz, evaluacija, solver, bodovanje)
-  - Skocko       : Logika igre kombinacije (animacija, dobitna kombinacija, bodovanje)
-  - Ko zna zna   : Logika igre kviza (animacija, izbor pitanja, odgovori, shuffle)
-  - Igra         : praćenje bodova, stanje igre, potvrda riječi
+  - Slagalica    : sva logika igre slova (abeceda, težine, rječnik, highscore, unos, provjera)
+  - MojBroj      : logika igre brojeva (odabir, izraz, evaluacija, solver, bodovanje)
+  - Skocko       : Logika igre kombinacije (dobitna kombinacija, bodovanje)
+  - Ko zna zna   : Logika igre kviza (izbor pitanja, odgovori, shuffle)
+  - Spojnice     : Logika igre Spojnice (izbor teme spojnice, shuffle, povezivanje odgovora sa pojmom)
+  - Igra         : praćenje bodova
   - MainScreen   : početni ekran, highscore, navigacija
   - SlagalicaApp : glavni GUI, orkestrator ekrana"""
 
@@ -254,8 +255,8 @@ class MojBroj:
 
     def __init__(self):
         # 6 slotova: indeksi 0-3 = mali, 4 = srednji, 5 = veliki
-        self.odabrani_brojevi: list = []
-        self.potroseni: list = []
+        self.odabrani_brojevi: list = [0] * 6
+        self.potroseni: list = [False] * 6
 
         self.ciljni_broj: int = 0
         self.cilj_fiksiran: bool = False
@@ -298,8 +299,8 @@ class MojBroj:
             return None
         val = self.animacija_vrijednosti[slot]
         self.fiksirani[slot] = True
-        self.odabrani_brojevi.append(val)
-        self.potroseni.append(False)
+        self.odabrani_brojevi[slot] = val
+        self.potroseni[slot] = False
         if all(self.fiksirani):
             self.svi_fiksirani = True
             self._pokreni_solver()
@@ -708,6 +709,84 @@ class KoZnaZna:
         return len(self.pitanja)
 
 # ─────────────────────────────────────────────
+#  Klasa  SPOJNICE
+# ─────────────────────────────────────────────
+class Spojnice:
+    BODOVI_TACNO  = 3
+    BODOVI_GRESKA = 0
+    BROJ_PAROVA   = 8
+
+    def __init__(self, putanja_db: str):
+        self.putanja_db = putanja_db
+        self.tema:    str  = ""
+        self.parovi:  dict = {}   # {pojam: odgovor}
+        self.spojeno: dict = {}   # {pojam: odgovor} – uspješno spojeni parovi
+        self.pogresno: set = set()  # pojmovi koji su pogrešno spojeni (privremeno)
+        self.bodovi:  int  = 0
+        self.odabrani_pojam: str | None = None
+        self._ucitaj_red()
+
+    def _ucitaj_red(self):
+        try:
+            conn = sqlite3.connect(self.putanja_db)
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT tema,
+                       pojam_1, odgovor_1, pojam_2, odgovor_2,
+                       pojam_3, odgovor_3, pojam_4, odgovor_4,
+                       pojam_5, odgovor_5, pojam_6, odgovor_6,
+                       pojam_7, odgovor_7, pojam_8, odgovor_8
+                FROM spojnice ORDER BY RANDOM() LIMIT 1
+            """)
+            red = cur.fetchone()
+            conn.close()
+        except Exception as e:
+            print(f"Greška pri čitanju spojnica: {e}")
+            red = None
+
+        if red:
+            self.tema = red[0]
+            self.parovi = {}
+            for i in range(self.BROJ_PAROVA):
+                pojam    = red[1 + i * 2]
+                odgovor  = red[2 + i * 2]
+                if pojam and odgovor:
+                    self.parovi[pojam] = odgovor
+        else:
+            self.tema   = "Nema podataka"
+            self.parovi = {}
+
+    def selektuj_pojam(self, pojam: str):
+        """Selektuje ili deselektuje pojam s lijeve strane."""
+        if self.odabrani_pojam == pojam:
+            self.odabrani_pojam = None
+        else:
+            self.odabrani_pojam = pojam
+
+    def pokusaj_spajanje(self, odgovor: str) -> bool | None:
+        """
+        Pokušava spojiti odabrani pojam s odgovorom.
+        Vraća True (tačno), False (pogrešno), None (nema odabranog pojma).
+        """
+        if self.odabrani_pojam is None:
+            return None
+        pojam = self.odabrani_pojam
+        self.odabrani_pojam = None
+        if self.parovi.get(pojam) == odgovor:
+            self.spojeno[pojam] = odgovor
+            self.bodovi += self.BODOVI_TACNO
+            return True
+        else:
+            return False
+
+    def reset(self):
+        self.spojeno        = {}
+        self.pogresno       = set()
+        self.bodovi         = 0
+        self.odabrani_pojam = None
+        self._ucitaj_red()
+
+# ─────────────────────────────────────────────
 #  Glavni GUI  –  SlagalicaApp
 # ─────────────────────────────────────────────
 class SlagalicaApp:
@@ -763,6 +842,19 @@ class SlagalicaApp:
         self._kzz_vrijede  = 10
         self._kzz_vrati_id = None
         self._putanja_db = os.path.join(_base, "Fajlovi", "ko_zna_zna.db")
+        
+        self.spojnice: Spojnice = None
+        self._sp_timer_id  = None
+        self._sp_vrijede   = 90
+        self._sp_vrati_id  = None
+
+        self._putanja_spojnice_db = os.path.join(_base, "Fajlovi", "spojnice.db")
+
+        # Interni state za GUI spojnica
+        self._sp_pojam_dugmad:   dict = {}   # pojam  -> Button
+        self._sp_odgovor_dugmad: dict = {}   # odgovor -> Button
+        self._sp_odabrani_pojam: str | None = None
+        self._sp_anim_running:   bool = False
  
     # ══════════════════════════════════════════
     #  Učitavanje ikonica
@@ -847,7 +939,7 @@ class SlagalicaApp:
             f_status=self.f_status
         )
  
-        self.igra_frame = tk.Frame(self.container, bg=BG_TAMNA)
+        self.slag_frame = tk.Frame(self.container, bg=BG_TAMNA)
         self._build_slag_ekran()
  
         self.mb_frame = tk.Frame(self.container, bg=BG_TAMNA)
@@ -858,6 +950,9 @@ class SlagalicaApp:
         
         self.kzz_frame = tk.Frame(self.container, bg=BG_TAMNA)
         self._build_kzz_ekran()
+        
+        self.sp_frame = tk.Frame(self.container, bg=BG_TAMNA)
+        self._build_sp_ekran()
  
         self.main_screen.show()
  
@@ -865,10 +960,11 @@ class SlagalicaApp:
     #  Navigacija
     # ══════════════════════════════════════════
     def _show_main_screen(self):
-        self.igra_frame.place_forget()
+        self.slag_frame.place_forget()
         self.mb_frame.place_forget()
         self.sk_frame.place_forget()
         self.kzz_frame.place_forget()
+        self.sp_frame.place_forget()
         self.main_screen.show()
  
     def _show_igra_ekran(self):
@@ -876,31 +972,42 @@ class SlagalicaApp:
         self.mb_frame.place_forget()
         self.sk_frame.place_forget()
         self.kzz_frame.place_forget()
-        self.igra_frame.place(relx=0, rely=0.08, relwidth=1, relheight=0.92)
+        self.sp_frame.place_forget()
+        self.slag_frame.place(relx=0, rely=0.08, relwidth=1, relheight=0.92)
  
     def _show_mb_ekran(self):
-        self.igra_frame.place_forget()
+        self.slag_frame.place_forget()
         self.sk_frame.place_forget()
         self.kzz_frame.place_forget()
+        self.sp_frame.place_forget()
         self.mb_frame.place(relx=0, rely=0.08, relwidth=1, relheight=0.92)
  
     def _show_sk_ekran(self):
         self.mb_frame.place_forget()
-        self.igra_frame.place_forget()
+        self.slag_frame.place_forget()
         self.kzz_frame.place_forget()
+        self.sp_frame.place_forget()
         self.sk_frame.place(relx=0, rely=0.08, relwidth=1, relheight=0.92)
     
     def _show_kzz_ekran(self):
-        self.igra_frame.place_forget()
+        self.slag_frame.place_forget()
         self.mb_frame.place_forget()
         self.sk_frame.place_forget()
+        self.sp_frame.place_forget()
         self.kzz_frame.place(relx=0, rely=0.08, relwidth=1, relheight=0.92)
+    
+    def _show_sp_ekran(self):
+        self.slag_frame.place_forget()
+        self.mb_frame.place_forget()
+        self.sk_frame.place_forget()
+        self.kzz_frame.place_forget()
+        self.sp_frame.place(relx=0, rely=0.08, relwidth=1, relheight=0.92)
         
     # ══════════════════════════════════════════
     #  Slagalica UI
     # ══════════════════════════════════════════
     def _build_slag_ekran(self):
-        f = self.igra_frame
+        f = self.slag_frame
  
         timer_frame = tk.Frame(f, bg=BG_TAMNA)
         timer_frame.pack(pady=(8, 4))
@@ -1130,10 +1237,6 @@ class SlagalicaApp:
             return
         unos_lista = self.slagalica.unos
         unos_str   = "".join(unos_lista)
-        if not unos_lista:
-            self.lbl_status.config(
-                text=" Niste unijeli nijedno slovo!", fg=ZLATNA)
-            return
  
         if self._timer_id:
             self.root.after_cancel(self._timer_id)
@@ -1227,11 +1330,9 @@ class SlagalicaApp:
  
     def _slag_vrijeme_isteklo(self):
         self.lbl_timer.config(text="0", fg=CRVENA)
-        if self._unos_aktivan:
-            self.lbl_status.config(
-                text="Vrijeme je isteklo! Automatska provjera...",
-                fg=ZLATNA)
-            self.root.after(500, self._slag_klik_potvrdi)
+        self.root.after(500, self._slag_klik_potvrdi)
+        self.lbl_status.config(text="Vrijeme je isteklo! Automatska provjera...", fg=ZLATNA)
+        self.root.after(500, self._slag_klik_potvrdi)
             
     # ══════════════════════════════════════════
     #  Moj Broj UI
@@ -1387,10 +1488,9 @@ class SlagalicaApp:
         for i in range(6):
             self.mb_var_slot[i].set("?")
             self.mb_btn_slot[i].config(
-                state="normal",
+                state="disabled",
                 bg=BG_KARTICA,
-                fg=self._mb_slot_fg[i]
-            )
+                fg=self._mb_slot_fg[i])
  
         self.mb_btn_cilj.config(state="normal", bg=BG_PANEL, fg=NARANCASTA)
  
@@ -1441,7 +1541,11 @@ class SlagalicaApp:
     def _mb_klik_slot(self, slot: int):
         if self.moj_broj is None:
             return
- 
+        
+        if not self.moj_broj.cilj_fiksiran and not self._mb_unos_aktivan:
+            self.mb_lbl_status.config(text="Prvo kliknite ciljni broj!", fg=CRVENA)
+            return
+        
         if not self._mb_unos_aktivan:
             val = self.moj_broj.fiksiraj_slot(slot)
             if val is None:
@@ -1462,12 +1566,8 @@ class SlagalicaApp:
         for i in range(6):
             val = self.moj_broj.odabrani_brojevi[i]
             self.mb_var_slot[i].set(str(val))
-            self.mb_btn_slot[i].config(
-                bg=BG_KARTICA,
-                fg=self._mb_slot_fg[i],
-                state="normal",
-                cursor="hand2"
-            )
+            self.mb_btn_slot[i].config(bg=BG_KARTICA, fg=self._mb_slot_fg[i],
+                                       state="normal", cursor="hand2")
  
         for btn in self.mb_btn_ops:
             btn.config(state="normal")
@@ -1522,6 +1622,10 @@ class SlagalicaApp:
         val = self.moj_broj.fiksiraj_cilj()
         self.mb_var_cilj.set(str(val))
         self.mb_btn_cilj.config(state="disabled", bg=BG_PANEL, fg=ZLATNA)
+        
+        for i in range(6):
+            self.mb_btn_slot[i].config(state="normal")
+        self.mb_lbl_status.config(text="Kliknite dugmad da odaberete brojeve!", fg=BIJELA)
  
     # ══════════════════════════════════════════
     #  MOJ BROJ – osvježi izraz
@@ -1847,6 +1951,7 @@ class SlagalicaApp:
         self.sk_btn_obrisi.config(state="normal")
  
         # Počisti rezultat frame (ne sakrivati — stalno je između bodova i matrice)
+        self.sk_rezultat_frame.pack_forget()
         for w in self.sk_rezultat_frame.winfo_children():
             w.destroy()
  
@@ -2023,6 +2128,7 @@ class SlagalicaApp:
     def _sk_prikazi_rezultate(self, zaradjeno: int):
         for w in self.sk_rezultat_frame.winfo_children():
             w.destroy()
+        self.sk_rezultat_frame.pack(after=self.sk_lbl_naslov, pady=(0, 2))
 
         center = tk.Frame(self.sk_rezultat_frame, bg=BG_TAMNA)
         center.pack()
@@ -2277,18 +2383,317 @@ class SlagalicaApp:
             Slagalica.spremi_highscore(self._putanja_highscore, self._highscore)
             self.main_screen.azuriraj_highscore(self._highscore)
 
-        self.kzz_lbl_feedback.config(
-            text=f"Kraj igre!  Ukupni bodovi: {self.igra.bodovi}", fg=ZLATNA)
-        self.kzz_lbl_pitanje.config(
-            text="Sledeca igra: Spojnice", fg=NARANCASTA)
+        self.kzz_lbl_feedback.config(text=f"Kraj igre!  Ukupni bodovi: {self.igra.bodovi}", fg=ZLATNA)
+        self.kzz_lbl_pitanje.config(text="Sledeca igra: Spojnice", fg=NARANCASTA)
         self.kzz_lbl_broj_pitanja.config(text="")
 
-        self._kzz_vrati_id = self.root.after(5000, self._kzz_vrati_na_main)
+        self._kzz_vrati_id = self.root.after(5000, self._start_spojnice)
+    
+    # ══════════════════════════════════════════
+    #  SPOJNICE – izgradnja UI
+    # ══════════════════════════════════════════
+    def _build_sp_ekran(self):
+        f = self.sp_frame
 
-    def _kzz_vrati_na_main(self):
-        self._kzz_vrati_id = None
+        # ── Gornji red: bodovi + timer ────────────────────────────
+        top_row = tk.Frame(f, bg=BG_TAMNA)
+        top_row.pack(fill="x", padx=60, pady=(8, 0))
+
+        self.sp_lbl_bodovi = tk.Label(top_row, text="Bodovi: 0",
+                                      bg=BG_TAMNA, fg=ZLATNA, font=self.f_bodovi)
+        self.sp_lbl_bodovi.pack(side="left")
+
+        sp_timer_frame = tk.Frame(top_row, bg=BG_TAMNA)
+        sp_timer_frame.pack(side="right")
+        if self._ikona_sat:
+            self.sp_lbl_sat = tk.Label(sp_timer_frame, image=self._ikona_sat, bg=BG_TAMNA)
+            self.sp_lbl_sat.pack(side="left", padx=(0, 4))
+        else:
+            self.sp_lbl_sat = None
+        self.sp_lbl_timer = tk.Label(sp_timer_frame, text="90",
+                                     bg=BG_TAMNA, fg=ZLATNA, font=self.f_bodovi)
+        self.sp_lbl_timer.pack(side="left")
+
+        # ── Tema (višeredni label) ────────────────────────────────
+        self.sp_lbl_tema = tk.Label(f, text="",
+                                    bg=BG_PANEL, fg=BIJELA,
+                                    font=self.f_rezultat,
+                                    wraplength=1600, justify="center",
+                                    padx=40, pady=16)
+        self.sp_lbl_tema.pack(fill="x", padx=60, pady=(10, 8))
+
+        # ── Feedback label ────────────────────────────────────────
+        self.sp_lbl_feedback = tk.Label(f, text="",
+                                        bg=BG_TAMNA, fg=BIJELA,
+                                        font=self.f_status)
+        self.sp_lbl_feedback.pack(pady=(0, 4))
+
+        # ── Glavni sadržaj: pojmovi (lijevo) + odgovori (desno) ───
+        self.sp_content = tk.Frame(f, bg=BG_TAMNA)
+        self.sp_content.pack(expand=True, fill="both", padx=60, pady=(0, 10))
+
+        self.sp_lijevo_frame = tk.Frame(self.sp_content, bg=BG_TAMNA)
+        self.sp_lijevo_frame.pack(side="left", expand=True, fill="both", padx=(0, 30))
+
+        self.sp_desno_frame = tk.Frame(self.sp_content, bg=BG_TAMNA)
+        self.sp_desno_frame.pack(side="left", expand=True, fill="both", padx=(30, 0))
+
+    # ══════════════════════════════════════════
+    #  SPOJNICE – start
+    # ══════════════════════════════════════════
+    def _start_spojnice(self):
+        if self._kzz_vrati_id:
+            self.root.after_cancel(self._kzz_vrati_id)
+            self._kzz_vrati_id = None
+
+        self.spojnice = Spojnice(self._putanja_spojnice_db)
+        self._sp_odabrani_pojam = None
+        self._sp_anim_running   = False
+        self._sp_vrijede        = 90
+
+        self._sp_reset_ekran()
+        self._show_sp_ekran()
+        self._sp_pokreni_timer()
+
+    def _sp_reset_ekran(self):
+        sp = self.spojnice
+        
+        for w in self.sp_desno_frame.winfo_children():
+            w.place_forget()
+        if not self.sp_desno_frame.winfo_ismapped():
+            self.sp_desno_frame.pack(side="left", expand=True,fill="both", padx=(30, 0))
+        self.sp_lbl_bodovi.config(text=f"Bodovi: {self.igra.bodovi}")
+        self.sp_lbl_timer.config(text="90", fg=ZLATNA)
+        self.sp_lbl_tema.config(text=sp.tema)
+        self.sp_lbl_feedback.config(text="")
+
+        if self.sp_lbl_sat:
+            self.sp_lbl_sat.pack(side="left", padx=(0, 4))
+
+        # Počisti stara dugmad
+        for w in self.sp_lijevo_frame.winfo_children():
+            w.destroy()
+        for w in self.sp_desno_frame.winfo_children():
+            w.destroy()
+
+        self._sp_pojam_dugmad   = {}
+        self._sp_odgovor_dugmad = {}
+        self._sp_pojam_redovi   = {}   # pojam -> tk.Frame (red u lijevo_frame)
+        self._sp_odgovor_redovi = {}   # odgovor -> tk.Frame (red u desno_frame)
+
+        pojmovi   = list(sp.parovi.keys())
+        odgovori  = list(sp.parovi.values())
+        random.shuffle(pojmovi)
+        random.shuffle(odgovori)
+
+        # Čuvamo originalni redosljed prikaza za animaciju
+        self._sp_pojam_redosljed   = pojmovi[:]
+        self._sp_odgovor_redosljed = odgovori[:]
+
+        for pojam in pojmovi:
+            row = tk.Frame(self.sp_lijevo_frame, bg=BG_TAMNA)
+            row.pack(fill="x", pady=3)
+            btn = tk.Button(row, text=pojam,
+                            bg=BG_KARTICA, fg=BIJELA,
+                            activebackground=ZLATNA_TAMNA, activeforeground=BG_TAMNA,
+                            font=self.f_status, relief="flat", bd=0,
+                            cursor="hand2", anchor="center",
+                            padx=20, pady=10,
+                            wraplength=580, justify="center",
+                            command=lambda p=pojam: self._sp_klik_pojam(p))
+            btn.pack(fill="x")
+            self._sp_pojam_dugmad[pojam]  = btn
+            self._sp_pojam_redovi[pojam]  = row
+
+        for odgovor in odgovori:
+            row = tk.Frame(self.sp_desno_frame, bg=BG_TAMNA)
+            row.pack(fill="x", pady=3)
+            btn = tk.Button(row, text=odgovor,
+                            bg=BG_KARTICA, fg=BIJELA,
+                            activebackground=ZLATNA_TAMNA, activeforeground=BG_TAMNA,
+                            font=self.f_status, relief="flat", bd=0,
+                            cursor="hand2", anchor="center",
+                            padx=20, pady=10,
+                            wraplength=580, justify="center",
+                            command=lambda o=odgovor: self._sp_klik_odgovor(o))
+            btn.pack(fill="x")
+            self._sp_odgovor_dugmad[odgovor] = btn
+            self._sp_odgovor_redovi[odgovor] = row
+
+    # ══════════════════════════════════════════
+    #  SPOJNICE – klik pojma (lijevo)
+    # ══════════════════════════════════════════
+    def _sp_klik_pojam(self, pojam: str):
+        if self.spojnice is None or self._sp_anim_running:
+            return
+        # Ako je već spojen/onemogućen, ignoriši
+        if self.spojnice.parovi.get(pojam) and pojam in self.spojnice.spojeno:
+            return
+
+        # Deselektuj prethodni
+        if self._sp_odabrani_pojam and self._sp_odabrani_pojam in self._sp_pojam_dugmad:
+            prev_btn = self._sp_pojam_dugmad[self._sp_odabrani_pojam]
+            if str(prev_btn['state']) != 'disabled':
+                prev_btn.config(bg=BG_KARTICA, fg=BIJELA)
+
+        if self._sp_odabrani_pojam == pojam:
+            # Deselektovanje
+            self._sp_odabrani_pojam = None
+            self.sp_lbl_feedback.config(text="")
+        else:
+            # Selektovanje novog
+            self._sp_odabrani_pojam = pojam
+            btn = self._sp_pojam_dugmad[pojam]
+            btn.config(bg=ZLATNA, fg=BG_TAMNA)
+            self.sp_lbl_feedback.config(
+                text=f"Odabrano: {pojam}  →  kliknite odgovor", fg=ZLATNA)
+
+    # ══════════════════════════════════════════
+    #  SPOJNICE – klik odgovora (desno)
+    # ══════════════════════════════════════════
+    def _sp_klik_odgovor(self, odgovor: str):
+        if self.spojnice is None or self._sp_anim_running:
+            return
+        if self._sp_odabrani_pojam is None:
+            self.sp_lbl_feedback.config(text="Prvo odaberite pojam s lijeve strane!", fg=CRVENA)
+            return
+
+        pojam = self._sp_odabrani_pojam
+        tacan = self.spojnice.parovi.get(pojam) == odgovor
+
+        btn_pojam   = self._sp_pojam_dugmad.get(pojam)
+        btn_odgovor = self._sp_odgovor_dugmad.get(odgovor)
+
+        if tacan:
+            self.spojnice.spojeno[pojam] = odgovor
+            self.spojnice.bodovi += Spojnice.BODOVI_TACNO
+            self.igra.dodaj_bodove(Spojnice.BODOVI_TACNO)
+            self.sp_lbl_bodovi.config(text=f"Bodovi: {self.igra.bodovi}")
+            if btn_pojam:
+                btn_pojam.config(bg=ZELENA, fg=BIJELA, state="disabled", cursor="arrow")
+            if btn_odgovor:
+                btn_odgovor.config(bg=ZELENA, fg=BIJELA, state="disabled", cursor="arrow")
+            self.sp_lbl_feedback.config(text=f"✔  Tačno! +{Spojnice.BODOVI_TACNO} bodova", fg=ZELENA)
+        else:
+        # POGREŠNO — samo resetuj selekciju, NE onemogućuj pojam!
+            if btn_pojam:
+                btn_pojam.config(bg=CRVENA, fg=BIJELA, state="disabled", cursor="arrow")
+            if btn_odgovor:
+            # Kratko pokaži crvenu, pa vrati na normalu
+                btn_odgovor.config(bg=CRVENA, fg=BIJELA)
+                self.root.after(600, lambda b=btn_odgovor: b.config(bg=BG_KARTICA, fg=BIJELA)
+                                if str(b['state']) != 'disabled' else None)
+            self.sp_lbl_feedback.config(text="✘  Pogrešno! Pokušajte ponovo.", fg=CRVENA)
+
+        self._sp_odabrani_pojam = None
+        self.spojnice.odabrani_pojam = None
+
+        if self.igra.bodovi > self._highscore:
+            self._highscore = self.igra.bodovi
+            Slagalica.spremi_highscore(self._putanja_highscore, self._highscore)
+            self.main_screen.azuriraj_highscore(self._highscore)
+
+        # Završi samo kad su SVI PAROVI tačno spojeni
+        sva_disabled = all(str(btn['state']) == 'disabled' for btn in self._sp_pojam_dugmad.values())
+        if sva_disabled:
+            self.root.after(800, lambda: self._sp_zavrsi(isteklo=False))
+
+    # ══════════════════════════════════════════
+    #  SPOJNICE – timer
+    # ══════════════════════════════════════════
+    def _sp_pokreni_timer(self):
+        if self._sp_timer_id:
+            self.root.after_cancel(self._sp_timer_id)
+        self._sp_odbrojavaj()
+
+    def _sp_odbrojavaj(self):
+        self.sp_lbl_timer.config(text=f"{self._sp_vrijede}")
+        self.sp_lbl_timer.config(fg=CRVENA if self._sp_vrijede <= 15 else ZLATNA)
+
+        if self._sp_vrijede <= 0:
+            self._sp_zavrsi(isteklo=True)
+            return
+
+        self._sp_vrijede -= 1
+        self._sp_timer_id = self.root.after(1000, self._sp_odbrojavaj)
+
+    # ══════════════════════════════════════════
+    #  SPOJNICE – završetak
+    # ══════════════════════════════════════════
+    def _sp_zavrsi(self, isteklo: bool = False):
+        if self._sp_anim_running:
+            return
+        if self._sp_timer_id:
+            self.root.after_cancel(self._sp_timer_id)
+            self._sp_timer_id = None
+
+        self.sp_lbl_timer.config(text="")
+        if self.sp_lbl_sat:
+            self.sp_lbl_sat.pack_forget()
+
+        # Onemogući sva preostala dugmad
+        for btn in self._sp_pojam_dugmad.values():
+            if str(btn['state']) != 'disabled':
+                btn.config(state="disabled", cursor="arrow")
+        for btn in self._sp_odgovor_dugmad.values():
+            if str(btn['state']) != 'disabled':
+                btn.config(state="disabled", cursor="arrow")
+
+        if isteklo:
+            self.sp_lbl_feedback.config(text="Vrijeme je isteklo!", fg=CRVENA)
+
+        self._sp_anim_running = True
+        self.root.after(600, self._sp_prikazi_rjesenja)
+
+    def _sp_prikazi_rjesenja(self):
+        sp = self.spojnice
+
+        for w in self.sp_desno_frame.winfo_children():
+            w.destroy()
+
+        for pojam in self._sp_pojam_redosljed:
+            odgovor = sp.parovi.get(pojam)
+            if not odgovor:
+                continue
+
+            btn_pojam = self._sp_pojam_dugmad.get(pojam)
+            bg_boja = btn_pojam.cget("bg") if btn_pojam else BG_KARTICA
+            btn_h = btn_pojam.winfo_height() if btn_pojam else 0
+
+            row = tk.Frame(self.sp_desno_frame, bg=BG_TAMNA, height=btn_h)
+            row.pack_propagate(False)
+            row.pack(fill="x", pady=3)
+
+            lbl = tk.Label(row, text=odgovor, bg=bg_boja, fg=BIJELA,
+            font=self.f_status, anchor="center", justify="center",
+            padx=20, pady=10, wraplength=580,)
+            lbl.pack(fill="both", expand=True)
+
+        self._sp_anim_running = False
+        self._sp_prikazi_kraj()
+
+    def _sp_prikazi_kraj(self):
+        """Prikaz finalnog rezultata nakon animacije, zatim prelaz na main screen."""
+        self.sp_lbl_feedback.config(
+            text=f"Kraj igre Spojnice!  Ukupni bodovi: {self.igra.bodovi}  |  "
+                 f"Sljedeća igra: Asocijacije",
+            fg=NARANCASTA)
+        spojeno_tacno = sum(1 for p in self.spojnice.parovi if p in self.spojnice.spojeno)
+        self.sp_lbl_tema.config(text=f"Spojili ste {spojeno_tacno} /"
+                                f"{len(self.spojnice.parovi)} parova  →  "
+                                f"+{self.spojnice.bodovi} bodova u ovoj rundi", fg=ZLATNA)
+
+        if self.igra.bodovi > self._highscore:
+            self._highscore = self.igra.bodovi
+            Slagalica.spremi_highscore(self._putanja_highscore, self._highscore)
+            self.main_screen.azuriraj_highscore(self._highscore)
+
+        self._sp_vrati_id = self.root.after(5000, self._sp_vrati_na_main)
+
+    def _sp_vrati_na_main(self):
+        self._sp_vrati_id = None
         self.igra.reset()
-        self.ko_zna_zna = None
+        self.spojnice = None
         self._show_main_screen()
  
     # ══════════════════════════════════════════
