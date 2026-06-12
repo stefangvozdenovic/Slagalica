@@ -51,17 +51,25 @@ NARANCASTA      = "#F97316"
 class MainScreen:
     def __init__(self, parent_frame: tk.Frame, highscore: int,
                  on_igraj, on_izlaz,
-                 f_bodovi, f_gumb, f_maly, f_status):
-        self.frame     = tk.Frame(parent_frame, bg=BG_TAMNA)
-        self.highscore = highscore
-        self.on_igraj  = on_igraj
-        self.on_izlaz  = on_izlaz
+                 f_bodovi, f_gumb, f_maly, f_status,
+                 logo_image=None):
+        self.frame      = tk.Frame(parent_frame, bg=BG_TAMNA)
+        self.highscore  = highscore
+        self.on_igraj   = on_igraj
+        self.on_izlaz   = on_izlaz
+        self._logo_image = logo_image  # ← DODAJ
         self._build(f_bodovi, f_gumb, f_maly, f_status)
 
     def _build(self, f_bodovi, f_gumb, f_maly, f_status):
         center = tk.Frame(self.frame, bg=BG_TAMNA)
         center.place(relx=0.5, rely=0.5, anchor="center")
-
+    
+        # DODAJ OVO (logo iznad highscore):
+        if self._logo_image:
+            lbl_logo = tk.Label(center, image=self._logo_image, bg=BG_TAMNA)
+            lbl_logo.image = self._logo_image  # referenca da GC ne obriše
+            lbl_logo.pack(pady=(0, 24))
+    
         hs_frame = tk.Frame(center, bg=BG_PANEL, padx=60, pady=20)
         hs_frame.pack(pady=(0, 40))
 
@@ -877,6 +885,15 @@ class SlagalicaApp:
         self._putanja_rjecnika  = os.path.join(_base, "Fajlovi", "serbian-words-latin.txt")
         self._putanja_highscore = os.path.join(_base, "Fajlovi", "highscore.txt")
         self._putanja_ikonica   = os.path.join(_base, "Fajlovi", "Icons")
+        self._logo_image = None
+        try:
+            from PIL import Image, ImageTk
+            _putanja_loga = os.path.join(_base, "Fajlovi", "logo.png")
+            if os.path.exists(_putanja_loga):
+                _img = Image.open(_putanja_loga).resize((320, 280), Image.LANCZOS)
+                self._logo_image = ImageTk.PhotoImage(_img)
+        except Exception:
+            self._logo_image = None
  
         self._rjecnik:   set = Slagalica.ucitaj_rjecnik(self._putanja_rjecnika)
         self._highscore: int = Slagalica.ucitaj_highscore(self._putanja_highscore)
@@ -1016,7 +1033,8 @@ class SlagalicaApp:
             f_bodovi=self.f_bodovi,
             f_gumb=self.f_gumb,
             f_maly=self.f_maly,
-            f_status=self.f_status
+            f_status=self.f_status,
+            logo_image=self._logo_image
         )
  
         self.slag_frame = tk.Frame(self.container, bg=BG_TAMNA)
