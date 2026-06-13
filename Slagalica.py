@@ -204,8 +204,8 @@ class Slagalica:
             else:
                 with open(putanja, 'r', encoding='utf-8', errors='ignore') as f:
                     for line in f:
-                        word = line.strip().upper()
-                        if word:
+                        word = line.strip().split('/')[0].upper()  # ✅ uklanja sufiks
+                        if word and not word.isdigit():            # ✅ preskače broj na prvoj liniji
                             rijeci.add(word)
         except Exception as e:
             print(f"Greška pri čitanju rječnika: {e}")
@@ -882,7 +882,7 @@ class SlagalicaApp:
         self.root.resizable(True, True)
  
         _base = os.path.dirname(os.path.abspath(__file__))
-        self._putanja_rjecnika  = os.path.join(_base, "Fajlovi", "serbian-words-latin.txt")
+        self._putanja_rjecnika = os.path.join(_base, "Fajlovi", "sr-Latn.dic")
         self._putanja_highscore = os.path.join(_base, "Fajlovi", "highscore.txt")
         self._putanja_ikonica   = os.path.join(_base, "Fajlovi", "Icons")
         self._logo_image = None
