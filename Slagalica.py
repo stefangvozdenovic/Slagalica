@@ -18,6 +18,7 @@ import os
 import itertools
 import operator
 import threading
+import sqlite3
 
 try:
     from docx import Document as DocxDocument
@@ -212,21 +213,29 @@ class Slagalica:
         return rijeci
 
     @staticmethod
+    @staticmethod
     def ucitaj_highscore(putanja: str) -> int:
-        if not putanja or not os.path.exists(putanja):
-            return 0
         try:
-            with open(putanja, 'r', encoding='utf-8') as f:
-                return int(f.read().strip())
+            conn = sqlite3.connect(putanja)
+            cur  = conn.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS highscore (bodovi INTEGER)")
+            cur.execute("SELECT bodovi FROM highscore ORDER BY bodovi DESC LIMIT 1")
+            red = cur.fetchone()
+            conn.close()
+            return red[0] if red else 0
         except Exception:
             return 0
-
+    
     @staticmethod
     def spremi_highscore(putanja: str, bodovi: int):
         try:
-            os.makedirs(os.path.dirname(putanja), exist_ok=True)
-            with open(putanja, 'w', encoding='utf-8') as f:
-                f.write(str(bodovi))
+            conn = sqlite3.connect(putanja)
+            cur  = conn.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS highscore (bodovi INTEGER)")
+            cur.execute("DELETE FROM highscore")
+            cur.execute("INSERT INTO highscore VALUES (?)", (bodovi,))
+            conn.commit()
+            conn.close()
         except Exception as e:
             print(f"Greška pri spremanju highscore-a: {e}")
 
@@ -626,8 +635,6 @@ class Skocko:
 # ─────────────────────────────────────────────
 #  Klasa  KO ZNA ZNA
 # ─────────────────────────────────────────────
-import sqlite3
-
 class KoZnaZna:
 
     def __init__(self, putanja_db: str):
@@ -883,7 +890,7 @@ class SlagalicaApp:
  
         _base = os.path.dirname(os.path.abspath(__file__))
         self._putanja_rjecnika = os.path.join(_base, "Fajlovi", "sr-Latn.dic")
-        self._putanja_highscore = os.path.join(_base, "Fajlovi", "highscore.txt")
+        self._putanja_highscore = os.path.join(_base, "Fajlovi", "highscore.db")
         self._putanja_ikonica   = os.path.join(_base, "Fajlovi", "Icons")
         self._logo_image = None
         try:
